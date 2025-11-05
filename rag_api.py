@@ -5,6 +5,7 @@ import os
 
 app = FastAPI(title="RAG API (multi)")
 
+# CORS so your frontend can call it
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -13,6 +14,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Gemini setup
 API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 genai = None
 if API_KEY:
@@ -22,9 +24,10 @@ if API_KEY:
     except Exception:
         genai = None
 
+# token for all endpoints
 RAG_TOKEN = os.getenv("RAG_API_TOKEN", "test")
 
-# start with some docs
+# initial docs (in-memory)
 DOCS = [
     "This is a RAG MCP project. MCP server runs locally and forwards queries.",
     "The RAG HTTP endpoint is deployed on Render and protected with Bearer token.",
@@ -32,14 +35,22 @@ DOCS = [
 ]
 
 
+# === MODELS ===
+
 class RAGQuery(BaseModel):
     query: str
     extra_context: str | None = None
 
 
+class QueryBody(BaseModel):
+    query: str
+
+
 class IngestBody(BaseModel):
     text: str
 
+
+# === UTILS ===
 
 def simple_retrieve(query: str, top_k: int = 3):
     qwords = query.lower().split()
@@ -55,20 +66,16 @@ def simple_retrieve(query: str, top_k: int = 3):
 def call_gemini(prompt: str):
     if not genai:
         return "(Gemini not configured) " + prompt
-    # try new model → fallback
+    # try your preferred model first
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
         resp = model.generate_content(prompt)
         return resp.text
     except Exception:
+        # fallback to a more common one
         model = genai.GenerativeModel("gemini-1.0-pro")
         resp = model.generate_content(prompt)
         return resp.text
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
 
 
 def check_auth(auth: str | None):
@@ -76,17 +83,22 @@ def check_auth(auth: str | None):
         raise HTTPException(401, "Invalid token")
 
 
+# === ROUTES ===
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 @app.post("/rag")
 async def rag_endpoint(body: RAGQuery, authorization: str = Header(None)):
-    # auth
-    expected = os.getenv("RAG_API_TOKEN", "test")
-    if authorization != f"Bearer {expected}":
-        raise HTTPException(401, "Invalid token")
+    # use common auth
+    check_auth(authorization)
 
-    # your existing retrieval
+    # retrieve from current docs
     docs = simple_retrieve(body.query)
 
-    # 👇 put user-provided context first so the model sees it
+    # put user-provided context first
     if body.extra_context:
         docs = [body.extra_context] + docs
 
@@ -96,8 +108,7 @@ async def rag_endpoint(body: RAGQuery, authorization: str = Header(None)):
         f"Question: {body.query}\n"
         "Answer clearly and mention which context you used."
     )
-
-    answer = call_gemini(prompt)  # whatever you already had
+    answer = call_gemini(prompt)
     return {"answer": answer, "sources": docs}
 
 
