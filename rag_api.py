@@ -1,15 +1,13 @@
-# rag_api.py
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 
-app = FastAPI(title="RAG API (Render + Gemini, safe)")
+app = FastAPI(title="RAG API (multi)")
 
-# 👇 add this
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # or ["http://localhost:5500", "http://127.0.0.1:5500"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,27 +22,9 @@ if API_KEY:
     except Exception:
         genai = None
 
-# ... keep the rest of the code you already have (the /health and /rag endpoints) ...
+RAG_TOKEN = os.getenv("RAG_API_TOKEN", "test")
 
-
-app = FastAPI(title="RAG API (safe)")
-
-# take key from either env name
-API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-
-genai = None
-if API_KEY:
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=API_KEY)
-    except Exception:
-        genai = None  # don't crash if import fails
-
-
-class RAGQuery(BaseModel):
-    query: str
-
-
+# start with some docs
 DOCS = [
     "This is a RAG MCP project. MCP server runs locally and forwards queries.",
     "The RAG HTTP endpoint is deployed on Render and protected with Bearer token.",
@@ -52,51 +32,83 @@ DOCS = [
 ]
 
 
+class QueryBody(BaseModel):
+    query: str
+
+
+class IngestBody(BaseModel):
+    text: str
+
+
+def simple_retrieve(query: str, top_k: int = 3):
+    qwords = query.lower().split()
+    scored = []
+    for d in DOCS:
+        score = sum(1 for w in qwords if w in d.lower())
+        scored.append((score, d))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    docs = [d for s, d in scored[:top_k] if s > 0]
+    return docs or DOCS[:1]
+
+
+def call_gemini(prompt: str):
+    if not genai:
+        return "(Gemini not configured) " + prompt
+    # try new model → fallback
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        resp = model.generate_content(prompt)
+        return resp.text
+    except Exception:
+        model = genai.GenerativeModel("gemini-1.0-pro")
+        resp = model.generate_content(prompt)
+        return resp.text
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
 
+def check_auth(auth: str | None):
+    if auth != f"Bearer {RAG_TOKEN}":
+        raise HTTPException(401, "Invalid token")
+
+
 @app.post("/rag")
-async def rag_endpoint(body: RAGQuery, authorization: str = Header(None)):
-    # auth
-    expected = os.getenv("RAG_API_TOKEN", "test")
-    if authorization != f"Bearer {expected}":
-        raise HTTPException(status_code=401, detail="Invalid token")
+async def rag_endpoint(body: QueryBody, authorization: str = Header(None)):
+    check_auth(authorization)
+    docs = simple_retrieve(body.query)
+    prompt = (
+        "You are a RAG assistant. Use ONLY this context.\n\n"
+        f"Context:\n{chr(10).join(docs)}\n\n"
+        f"Question: {body.query}\n"
+        "Answer clearly and mention which context you used."
+    )
+    answer = call_gemini(prompt)
+    return {"answer": answer, "sources": docs}
 
-    # simple retrieval
-    qwords = body.query.lower().split()
-    relevant = [d for d in DOCS if any(w in d.lower() for w in qwords)] or DOCS[:1]
 
-    # default answer in case LLM fails
-    answer = f"(no LLM) best match: {relevant[0]}"
+@app.post("/retrieve")
+async def retrieve_endpoint(body: QueryBody, authorization: str = Header(None)):
+    check_auth(authorization)
+    docs = simple_retrieve(body.query)
+    return {"query": body.query, "results": docs}
 
-    if genai:
-        prompt = (
-            "You are a RAG-style assistant. Use ONLY the context below.\n\n"
-            f"Context:\n{chr(10).join(relevant)}\n\n"
-            f"Question: {body.query}\n"
-            "Answer clearly and mention which context you used."
-        )
-        # 1) try your preferred model
-        try:
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            resp = model.generate_content(prompt)
-            answer = resp.text
-        except Exception as e1:
-            # 2) fall back to older, more available one
-            try:
-                model = genai.GenerativeModel("gemini-1.0-pro")
-                resp = model.generate_content(prompt)
-                answer = resp.text
-            except Exception as e2:
-                # 3) still return JSON, don't 500
-                answer = (
-                    f"(LLM error: {e1}; fallback error: {e2}) "
-                    f"Context: {relevant[0]}"
-                )
 
-    return {
-        "answer": answer,
-        "sources": relevant,
-    }
+@app.post("/summarize")
+async def summarize_endpoint(body: QueryBody, authorization: str = Header(None)):
+    check_auth(authorization)
+    prompt = (
+        "Summarize the following text in 3-5 bullet points:\n\n"
+        f"{body.query}"
+    )
+    summary = call_gemini(prompt)
+    return {"summary": summary}
+
+
+@app.post("/ingest")
+async def ingest_endpoint(body: IngestBody, authorization: str = Header(None)):
+    check_auth(authorization)
+    DOCS.append(body.text)
+    return {"status": "ok", "count": len(DOCS)}
