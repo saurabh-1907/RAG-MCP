@@ -32,8 +32,9 @@ DOCS = [
 ]
 
 
-class QueryBody(BaseModel):
+class RAGQuery(BaseModel):
     query: str
+    extra_context: str | None = None
 
 
 class IngestBody(BaseModel):
@@ -76,16 +77,27 @@ def check_auth(auth: str | None):
 
 
 @app.post("/rag")
-async def rag_endpoint(body: QueryBody, authorization: str = Header(None)):
-    check_auth(authorization)
+async def rag_endpoint(body: RAGQuery, authorization: str = Header(None)):
+    # auth
+    expected = os.getenv("RAG_API_TOKEN", "test")
+    if authorization != f"Bearer {expected}":
+        raise HTTPException(401, "Invalid token")
+
+    # your existing retrieval
     docs = simple_retrieve(body.query)
+
+    # 👇 put user-provided context first so the model sees it
+    if body.extra_context:
+        docs = [body.extra_context] + docs
+
     prompt = (
         "You are a RAG assistant. Use ONLY this context.\n\n"
         f"Context:\n{chr(10).join(docs)}\n\n"
         f"Question: {body.query}\n"
         "Answer clearly and mention which context you used."
     )
-    answer = call_gemini(prompt)
+
+    answer = call_gemini(prompt)  # whatever you already had
     return {"answer": answer, "sources": docs}
 
 
