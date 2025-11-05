@@ -1,7 +1,31 @@
 # rag_api.py
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
+
+app = FastAPI(title="RAG API (Render + Gemini, safe)")
+
+# 👇 add this
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # or ["http://localhost:5500", "http://127.0.0.1:5500"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+genai = None
+if API_KEY:
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=API_KEY)
+    except Exception:
+        genai = None
+
+# ... keep the rest of the code you already have (the /health and /rag endpoints) ...
+
 
 app = FastAPI(title="RAG API (safe)")
 
